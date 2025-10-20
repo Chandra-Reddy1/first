@@ -1,0 +1,80 @@
+name: AI Self-Healing Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js (example build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Build
+        id: build
+        continue-on-error: true
+        run: |
+          echo "Running build..."
+          npm install
+          npm run build 2>&1 | tee build_logs.txt
+
+      - name: Check if Build Failed
+        id: check
+        run: |
+          if [ "${{ steps.build.outcome }}" = "failure" ]; then
+            echo "build_failed=true" >> $GITHUB_ENV
+          else
+            echo "build_failed=false" >> $GITHUB_ENV
+          fi
+
+      - name: Send Logs to AI API
+        if: env.build_failed == 'true'
+        id: ai_analysis
+        run: |
+          echo "Sending logs to AI for analysis..."
+          logs=$(cat build_logs.txt | tail -n 200 | jq -sRr @json)
+          
+          # Replace with your internal AI API endpoint
+          response=$(curl -s -X POST https://internal-ai/api/analyze \
+            -H "Content-Type: application/json" \
+            -d "{\"logs\": $logs, \"context\": \"GitHub Actions build failed, suggest fix script.\"}")
+
+          echo "AI response: $response" > ai_response.txt
+          echo "response=$response" >> $GITHUB_OUTPUT
+
+      - name: Apply AI Fix (if provided)
+        if: env.build_failed == 'true'
+        run: |
+          echo "Applying AI Fix..."
+          fix_script=$(jq -r '.suggestion // ""' ai_response.txt)
+          if [ "$fix_script" != "" ]; then
+            echo "$fix_script" > ai_fix.sh
+            chmod +x ai_fix.sh
+            ./ai_fix.sh || true
+            git config user.name "AI Fix Bot"
+            git config user.email "bot@example.com"
+            git checkout -b ai-fix-$(date +%s)
+            git add .
+            git commit -m "AI: Fix build issue automatically"
+            git push origin HEAD
+          else
+            echo "No fix provided by AI."
+          fi
+
+      - name: Comment on PR with AI Suggestion
+        if: env.build_failed == 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: ai-suggestion
+          message: |
+            ⚙️ **AI Analysis Result**
+            ${{ steps.ai_analysis.outputs.response }}
