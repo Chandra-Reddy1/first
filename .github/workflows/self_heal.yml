@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-  pull_request:
 
 jobs:
   build:
@@ -14,12 +13,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js (example build)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Run Build
+      - name: Run build (example)
         id: build
         continue-on-error: true
         run: |
@@ -27,7 +21,7 @@ jobs:
           npm install
           npm run build 2>&1 | tee build_logs.txt
 
-      - name: Check if Build Failed
+      - name: Check if build failed
         id: check
         run: |
           if [ "${{ steps.build.outcome }}" = "failure" ]; then
@@ -36,45 +30,38 @@ jobs:
             echo "build_failed=false" >> $GITHUB_ENV
           fi
 
-      - name: Send Logs to AI API
+      - name: Analyze logs with ChatGPT
         if: env.build_failed == 'true'
-        id: ai_analysis
+        id: chatgpt
         run: |
-          echo "Sending logs to AI for analysis..."
-          logs=$(cat build_logs.txt | tail -n 200 | jq -sRr @json)
-          
-          # Replace with your internal AI API endpoint
-          response=$(curl -s -X POST https://internal-ai/api/analyze \
+          logs=$(tail -n 200 build_logs.txt | jq -Rs .)
+          payload=$(jq -n --arg logs "$logs" '{
+            model: "gpt-4o",
+            messages: [
+              { "role": "system", "content": "You are a DevOps expert. Analyze CI/CD logs and suggest a fix." },
+              { "role": "user", "content": $logs }
+            ]
+          }')
+
+          echo "Sending logs to ChatGPT..."
+          response=$(curl -s https://api.openai.com/v1/chat/completions \
             -H "Content-Type: application/json" \
-            -d "{\"logs\": $logs, \"context\": \"GitHub Actions build failed, suggest fix script.\"}")
+            -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
+            -d "$payload")
 
-          echo "AI response: $response" > ai_response.txt
-          echo "response=$response" >> $GITHUB_OUTPUT
+          echo "$response" > chatgpt_output.json
+          suggestion=$(jq -r '.choices[0].message.content' chatgpt_output.json)
+          echo "AI Suggestion:"
+          echo "$suggestion"
+          echo "suggestion<<EOF" >> $GITHUB_ENV
+          echo "$suggestion" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
-      - name: Apply AI Fix (if provided)
-        if: env.build_failed == 'true'
-        run: |
-          echo "Applying AI Fix..."
-          fix_script=$(jq -r '.suggestion // ""' ai_response.txt)
-          if [ "$fix_script" != "" ]; then
-            echo "$fix_script" > ai_fix.sh
-            chmod +x ai_fix.sh
-            ./ai_fix.sh || true
-            git config user.name "AI Fix Bot"
-            git config user.email "bot@example.com"
-            git checkout -b ai-fix-$(date +%s)
-            git add .
-            git commit -m "AI: Fix build issue automatically"
-            git push origin HEAD
-          else
-            echo "No fix provided by AI."
-          fi
-
-      - name: Comment on PR with AI Suggestion
+      - name: Post AI suggestion as comment
         if: env.build_failed == 'true'
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: ai-suggestion
           message: |
-            ⚙️ **AI Analysis Result**
-            ${{ steps.ai_analysis.outputs.response }}
+            ⚙️ **ChatGPT Analysis**
+            ${{ env.suggestion }}
